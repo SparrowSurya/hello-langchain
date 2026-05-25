@@ -137,16 +137,30 @@ while (true) {
   if (line === '.exit') break;
 
   const messages = [new HumanMessage(line)];
-  const result = await agent.invoke({ messages }, config);
+  const stream = await agent.stream(
+    { messages },
+    { ...config, streamMode: "messages" }
+  );
 
-  let lines = 0;
-  for (const msg of result.messages.slice(lineNo)) {
-    if (msg.type === "ai" && msg.text.trim().length > 0) {
-      console.log(`[${msg.type.toUpperCase()}]: ${msg.text}`);
+  let aiHeaderPrinted = false;
+  for await (const [msg, metadata] of stream) {
+    if (msg.type === "ai" && metadata.langgraph_node === "llmCall") {
+      if (!aiHeaderPrinted) {
+        process.stdout.write("[AI]: ");
+        aiHeaderPrinted = true;
+      }
+      if (msg.content) {
+        process.stdout.write(msg.content as string);
+      }
     }
-    lines += 1;
   }
-  lineNo += lines;
+
+  if (aiHeaderPrinted) {
+    process.stdout.write("\n");
+  }
+
+  const finalState = await agent.getState(config);
+  lineNo = (finalState.values.messages as any[]).length;
 }
 
 await reader.return?.();
