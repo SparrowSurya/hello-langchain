@@ -15,6 +15,27 @@ import {
 import { z } from "zod";
 import { ChatOllama } from "@langchain/ollama";
 
+const HISTORY_FILE = "./chat_history.json";
+
+async function saveHistory(messages: any[]) {
+  const data = JSON.stringify(messages, null, 2);
+  await Bun.write(HISTORY_FILE, data);
+}
+
+async function loadHistory() {
+  const file = Bun.file(HISTORY_FILE);
+  if (await file.exists()) {
+    const raw = await file.json();
+    return raw.map((m: any) => {
+      if (m.type === "human") return new HumanMessage(m.content);
+      if (m.type === "ai") return new AIMessage({ content: m.content, tool_calls: m.tool_calls });
+      if (m.type === "system") return new SystemMessage(m.content);
+      if (m.type === "tool") return new ToolMessage({ content: m.content, tool_call_id: m.tool_call_id });
+      return m;
+    });
+  }
+  return [];
+}
 
 const add = tool(({ a, b }) => a + b, {
   name: "add",
@@ -51,12 +72,6 @@ const toolsByName = {
 type ToolName = keyof typeof toolsByName;
 const tools = Object.values(toolsByName);
 
-// const modelWithTools = new ChatGoogleGenerativeAI({
-//     model: process.env.MODEL_NAME!,
-//     apiKey: process.env.GEMINI_API_KEY!,
-//     temperature: 0,
-// }).bindTools(tools);
-
 const modelWithTools = new ChatOllama({
   model: "gemma4:e2b",
   baseUrl: "http://127.0.0.1:11434",
@@ -85,7 +100,7 @@ const llmCall: GraphNode<typeof MessagesState> = async (state) => {
 };
 
 const toolNode: GraphNode<typeof MessagesState> = async (state) => {
-  const lastMessage = state.messages.at(-1);
+  const lastMessage = state.messages[state.messages.length - 1];
 
   if (lastMessage == null || !AIMessage.isInstance(lastMessage)) {
     return { messages: [] };
@@ -102,7 +117,7 @@ const toolNode: GraphNode<typeof MessagesState> = async (state) => {
 };
 
 const shouldContinue: ConditionalEdgeRouter<typeof MessagesState, Record<string, any>, "toolNode"> = (state) => {
-  const lastMessage = state.messages.at(-1);
+  const lastMessage = state.messages[state.messages.length - 1];
 
   if (!lastMessage || !AIMessage.isInstance(lastMessage)) {
     return END;
@@ -126,9 +141,22 @@ const agent = new StateGraph(MessagesState)
   .addEdge("toolNode", "llmCall")
   .compile({ checkpointer });
 
+const history = await loadHistory();
 
-console.log("Use '.exit' to quit!");
-let lineNo = 0;
+if (history.length > 0) {
+  console.log(`\n[System]: Resuming session from '${HISTORY_FILE}'...`);
+  await agent.updateState(config, { messages: history });
+
+  for (const msg of history) {
+    if (msg.content && msg.content.trim().length > 0) {
+      console.log(`[${msg.type.toUpperCase()}]: ${msg.content}`);
+    }
+  }
+  console.log("[System]: History loaded.\n");
+} else {
+  console.log("\n[System]: Started a new session.");
+  console.log("Use '.exit' to quit!\n");
+}
 
 const reader = console[Symbol.asyncIterator]();
 while (true) {
@@ -160,10 +188,9 @@ while (true) {
   }
 
   const finalState = await agent.getState(config);
-  lineNo = (finalState.values.messages as any[]).length;
+  const allMessages = finalState.values.messages as any[];
+
+  await saveHistory(allMessages);
 }
 
 await reader.return?.();
-
-// const state = await agent.getState(config);
-// console.log("State:", state);
