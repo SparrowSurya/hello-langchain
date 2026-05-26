@@ -9,12 +9,14 @@ import {
   type ConditionalEdgeRouter,
   START,
   END,
-  MemorySaver,
   type LangGraphRunnableConfig,
 } from "@langchain/langgraph";
+import { BunSqliteSaver } from "langgraph-checkpoint-bunsqlite";
 import { z } from "zod";
 import { ChatOllama } from "@langchain/ollama";
 
+/*
+// Previous manual file-based persistence (Commented out)
 const HISTORY_FILE = "./chat_history.json";
 
 async function saveHistory(messages: any[]) {
@@ -36,6 +38,7 @@ async function loadHistory() {
   }
   return [];
 }
+*/
 
 const add = tool(({ a, b }) => a + b, {
   name: "add",
@@ -130,7 +133,8 @@ const shouldContinue: ConditionalEdgeRouter<typeof MessagesState, Record<string,
   return END;
 };
 
-const checkpointer = new MemorySaver();
+// --- BUN SQLITE PERSISTENCE ---
+const checkpointer = new BunSqliteSaver({ dbPath: "./checkpoints.db" });
 const config = { configurable: { thread_id: '1' }} as LangGraphRunnableConfig;
 
 const agent = new StateGraph(MessagesState)
@@ -141,18 +145,19 @@ const agent = new StateGraph(MessagesState)
   .addEdge("toolNode", "llmCall")
   .compile({ checkpointer });
 
-const history = await loadHistory();
+// --- RESUME LOGIC (Bun SQLite) ---
+const existingState = await agent.getState(config);
 
-if (history.length > 0) {
-  console.log(`\n[System]: Resuming session from '${HISTORY_FILE}'...`);
-  await agent.updateState(config, { messages: history });
+if (existingState.values.messages && (existingState.values.messages as any[]).length > 0) {
+  console.log(`\n[System]: Resuming session '${config.configurable?.thread_id}' from Bun SQLite DB...`);
+  const history = existingState.values.messages as any[];
 
   for (const msg of history) {
     if (msg.content && msg.content.trim().length > 0) {
       console.log(`[${msg.type.toUpperCase()}]: ${msg.content}`);
     }
   }
-  console.log("[System]: History loaded.\n");
+  console.log("[System]: History loaded. You can continue the chat.\n");
 } else {
   console.log("\n[System]: Started a new session.");
   console.log("Use '.exit' to quit!\n");
@@ -187,10 +192,7 @@ while (true) {
     process.stdout.write("\n");
   }
 
-  const finalState = await agent.getState(config);
-  const allMessages = finalState.values.messages as any[];
-
-  await saveHistory(allMessages);
+  // Automatic checkpointing happens here via the checkpointer
 }
 
 await reader.return?.();
